@@ -74,6 +74,12 @@ pub struct ParquetApp {
     show_search: bool,
     dark_mode:   bool,
     notice:      Option<String>,
+
+    // Column-name search (independent of the row-value search above)
+    column_search:                String,
+    show_column_search:           bool,
+    column_search_active:         usize,
+    column_search_scroll_pending: bool,
 }
 
 impl ParquetApp {
@@ -90,6 +96,11 @@ impl ParquetApp {
             show_search: false,
             dark_mode,
             notice:      None,
+
+            column_search:                String::new(),
+            show_column_search:           false,
+            column_search_active:         0,
+            column_search_scroll_pending: false,
         };
         let palette = if dark_mode { Palette::dark() } else { Palette::light() };
         style_egui(&cc.egui_ctx, &palette, dark_mode);
@@ -103,6 +114,9 @@ impl ParquetApp {
         self.state = State::Loading;
         self.search.clear();
         self.show_search = false;
+        self.column_search.clear();
+        self.show_column_search = false;
+        self.column_search_active = 0;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         loader::load_async(path, tx);
@@ -141,6 +155,17 @@ impl ParquetApp {
         });
     }
 
+    /// Open or close the column-name search bar. Mirrors the row-search
+    /// toggle in `update()`'s Ctrl+F handler.
+    fn toggle_column_search(&mut self) {
+        self.show_column_search = !self.show_column_search;
+        if self.show_column_search {
+            self.column_search_scroll_pending = true;
+        } else {
+            self.column_search.clear();
+        }
+    }
+
     /// Register the app for .parquet/.parq and open Windows' Default-apps
     /// settings so the user can finish setting it as the default handler.
     #[cfg(windows)]
@@ -177,15 +202,24 @@ impl eframe::App for ParquetApp {
 
         // Keyboard shortcuts
         ctx.input(|i| {
-            if i.key_pressed(egui::Key::F) && i.modifiers.ctrl {
+            if i.key_pressed(egui::Key::F) && i.modifiers.ctrl && !i.modifiers.shift {
                 self.show_search = !self.show_search;
                 if !self.show_search { self.search.clear(); }
             }
-            if i.key_pressed(egui::Key::Escape) {
+            if i.key_pressed(egui::Key::F) && i.modifiers.ctrl && i.modifiers.shift {
+                self.toggle_column_search();
+            }
+            if i.key_pressed(egui::Key::Escape) && (self.show_search || self.show_column_search) {
                 self.show_search = false;
                 self.search.clear();
+                self.show_column_search = false;
+                self.column_search.clear();
             }
         });
+
+        // Column search: match list is rebuilt each frame from the current
+        // query; kept separate from the row-search `filtered` list below.
+        let mut column_matches: Vec<usize> = Vec::new();
 
         // Top menu bar
         egui::TopBottomPanel::top("menubar")
@@ -216,11 +250,17 @@ impl eframe::App for ParquetApp {
                         }
                     });
 
+                    if ui.add(egui::Button::new(
+                        RichText::new("Find column…").color(palette.text).size(13.0)
+                    ).frame(false)).clicked() {
+                        self.toggle_column_search();
+                    }
+
                     ui.add_space(4.0);
                     ui.add(egui::Separator::default().vertical().spacing(8.0));
                     ui.add_space(4.0);
 
-                    ui.label(RichText::new("Ctrl+O  open   Ctrl+F  search").color(palette.muted).size(11.0));
+                    ui.label(RichText::new("Ctrl+O  open   Ctrl+F  search   Ctrl+Shift+F  find column").color(palette.muted).size(11.0));
 
                     #[cfg(windows)]
                     {
@@ -322,6 +362,84 @@ impl eframe::App for ParquetApp {
                 });
         }
 
+        // Column search bar
+        if self.show_column_search {
+            egui::TopBottomPanel::top("columnsearchbar")
+                .frame(egui::Frame::new().fill(palette.surface2).inner_margin(egui::Margin::symmetric(12, 6)))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Column:").color(palette.muted).size(12.0));
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.column_search)
+                                .desired_width(240.0)
+                                .hint_text("search column name…")
+                                .font(FontId::monospace(13.0))
+                        );
+                        resp.request_focus();
+
+                        // Rebuild the match list against this frame's (possibly
+                        // just-edited) query so the count/highlight stay in sync.
+                        if let State::Loaded(data, _) = &self.state {
+                            if !self.column_search.is_empty() {
+                                let q = self.column_search.to_lowercase();
+                                column_matches = data.columns.iter().enumerate()
+                                    .filter(|(_, c)| c.name.to_lowercase().contains(&q))
+                                    .map(|(i, _)| i)
+                                    .collect();
+                            }
+                        }
+
+                        if resp.changed() {
+                            self.column_search_active = 0;
+                            self.column_search_scroll_pending = true;
+                        }
+                        self.column_search_active = if column_matches.is_empty() {
+                            0
+                        } else {
+                            self.column_search_active.min(column_matches.len() - 1)
+                        };
+
+                        let count = column_matches.len();
+                        let pos = if count == 0 { 0 } else { self.column_search_active + 1 };
+                        ui.label(RichText::new(format!("{pos} / {count}")).color(palette.muted).size(12.0));
+
+                        if ui.small_button("◀").clicked() && count > 0 {
+                            self.column_search_active = (self.column_search_active + count - 1) % count;
+                            self.column_search_scroll_pending = true;
+                        }
+                        if ui.small_button("▶").clicked() && count > 0 {
+                            self.column_search_active = (self.column_search_active + 1) % count;
+                            self.column_search_scroll_pending = true;
+                        }
+
+                        if !self.column_search.is_empty() && ui.small_button("×").clicked() {
+                            self.column_search.clear();
+                        }
+                    });
+                });
+
+            // Enter / Shift+Enter cycle through matches while the bar is open.
+            if !column_matches.is_empty() {
+                let n = column_matches.len();
+                ctx.input(|i| {
+                    if i.key_pressed(egui::Key::Enter) {
+                        self.column_search_active = if i.modifiers.shift {
+                            (self.column_search_active + n - 1) % n
+                        } else {
+                            (self.column_search_active + 1) % n
+                        };
+                        self.column_search_scroll_pending = true;
+                    }
+                });
+            }
+        } else {
+            self.column_search_active = 0;
+        }
+
+        let active_col = column_matches.get(self.column_search_active).copied();
+        let column_scroll_pending = self.column_search_scroll_pending;
+        self.column_search_scroll_pending = false;
+
         // Notice strip (file-association feedback)
         if let Some(msg) = self.notice.clone() {
             egui::TopBottomPanel::top("notice")
@@ -355,7 +473,10 @@ impl eframe::App for ParquetApp {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(palette.bg))
                 .show(ctx, |ui| {
-                    draw_table(ui, &palette, data, ts, &self.search, self.show_search);
+                    draw_table(
+                        ui, &palette, data, ts, &self.search, self.show_search,
+                        &column_matches, active_col, column_scroll_pending,
+                    );
                 });
         }
     }
@@ -363,6 +484,7 @@ impl eframe::App for ParquetApp {
 
 // ── Table rendering ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // row-search and column-search state are independent concerns
 fn draw_table(
     ui: &mut egui::Ui,
     p: &Palette,
@@ -370,6 +492,9 @@ fn draw_table(
     ts: &mut TableState,
     search: &str,
     show_search: bool,
+    column_matches: &[usize],
+    active_col: Option<usize>,
+    scroll_to_active_col: bool,
 ) {
     let query = if show_search && !search.is_empty() {
         Some(search.to_lowercase())
@@ -418,10 +543,19 @@ fn draw_table(
                 let meta = &data.columns[col_idx];
                 let is_sorted = ts.sort_col == Some(col_idx);
                 let sort_asc = ts.sort_asc;
+                let is_column_match = column_matches.contains(&col_idx);
+                let is_active_column_match = active_col == Some(col_idx);
 
                 header.col(|ui| {
                     let rect = ui.available_rect_before_wrap();
                     ui.painter().rect_filled(rect, 0.0, p.header_bg);
+                    if is_column_match {
+                        // Subtle amber tint, same hue as row-search match highlighting.
+                        ui.painter().rect_filled(
+                            rect, 0.0,
+                            Color32::from_rgba_premultiplied(255, 200, 50, 40),
+                        );
+                    }
                     ui.painter().line_segment(
                         [rect.right_top(), rect.right_bottom()],
                         Stroke::new(1.0, p.border),
@@ -430,6 +564,12 @@ fn draw_table(
                         [rect.left_bottom(), rect.right_bottom()],
                         Stroke::new(1.0, p.border),
                     );
+                    if is_active_column_match {
+                        ui.painter().rect_stroke(rect, 0.0, Stroke::new(2.0_f32, p.accent), egui::StrokeKind::Inside);
+                        if scroll_to_active_col {
+                            ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                        }
+                    }
 
                     let response = ui.allocate_rect(rect, egui::Sense::click());
                     if response.hovered() {
