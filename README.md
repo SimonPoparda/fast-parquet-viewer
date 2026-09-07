@@ -62,28 +62,6 @@ Here's how to get it running locally:
 git clone https://github.com/SimonPoparda/fast-parquet-viewer
 cd fast-parquet-viewer
 
-Verified: cargo check --release builds clean (only 8 pre-existing, unrelated warnings); reviewed the full diff myself.
-
-Not verified: actual GUI interaction (scrolling/highlighting visually) — no display available in this sandbox. Worth a quick manual smoke-test with a real .parquet file on your machine (cargo run -- yourfile.parquet) before you rely on it.
-
-✻ Churned for 37s · done 5:00 AM ·
-
-※ recap: Forking Fast-Parquet-Vieweimplemented and pushed to yourfast-parquet-viewer repo, build verified. Next: run it locally with a real parquet file to confirm the search works visually. (disable recaps in /config)
-
-❯ how can I download it and use the UI directly on my computer?
-
-Here's how to get it running locally:
-
-1. Install Rust (if you don't hav
-
-- Windows: download and run rustu
-- macOS/Linux: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-2. Clone your fork
-
-git clone https://github.com/SimonPoparda/fast-parquet-viewer
-cd fast-parquet-viewer
-
 3. Build & run
 
 Quickest way to just try it:
