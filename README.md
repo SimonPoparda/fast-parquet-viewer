@@ -47,6 +47,65 @@ cargo build --release
 | [parquet](https://github.com/apache/arrow-rs/tree/master/parquet) | Parquet file reading |
 | [rfd](https://github.com/PolyMeilex/rfd) | Native file dialog |
 
+## How to use it?
+❯ how can I download it and use the UI directly on my computer?
+
+Here's how to get it running locally:
+
+1. Install Rust (if you don't have it)
+
+- Windows: download and run rustup-init.exe, accept defaults.
+- macOS/Linux: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+2. Clone your fork
+
+git clone https://github.com/SimonPoparda/fast-parquet-viewer
+cd fast-parquet-viewer
+
+Verified: cargo check --release builds clean (only 8 pre-existing, unrelated warnings); reviewed the full diff myself.
+
+Not verified: actual GUI interaction (scrolling/highlighting visually) — no display available in this sandbox. Worth a quick manual smoke-test with a real .parquet file on your machine (cargo run -- yourfile.parquet) before you rely on it.
+
+✻ Churned for 37s · done 5:00 AM ·
+
+※ recap: Forking Fast-Parquet-Vieweimplemented and pushed to yourfast-parquet-viewer repo, build verified. Next: run it locally with a real parquet file to confirm the search works visually. (disable recaps in /config)
+
+❯ how can I download it and use the UI directly on my computer?
+
+Here's how to get it running locally:
+
+1. Install Rust (if you don't hav
+
+- Windows: download and run rustu
+- macOS/Linux: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+2. Clone your fork
+
+git clone https://github.com/SimonPoparda/fast-parquet-viewer
+cd fast-parquet-viewer
+
+3. Build & run
+
+Quickest way to just try it:
+cargo run --release
+This compiles and launches the GUd takes a few minutes (release +LTO); subsequent builds are fast.
+
+To open a specific file immediately:
+cargo run --release -- path/to/yo
+
+4. Get a standalone binary (optional)
+
+After cargo build --release, the executable is at:
+- Windows: target\release\FastParquetViewer.exe
+- macOS/Linux: target/release/FastParquetViewer
+
+You can copy that single file anywhere and double-click/run it directly — no install needed. On
+Windows there's also a "Set as deu bar to associate .parquet/.parqfiles with it.
+
+5. Try the new feature
+
+Open any .parquet file (drag & drop onto the window, or Ctrl+O), then press Ctrl+Shift+F (or click "Find column…") and type a substring like cus — it should scroll to and highlight the matching column header. Ctrl+F stue search, independently.
+
 ## Original author
 
 Jakob Aungiers — [jaungiers/Fast-Parquet-Viewer](https://github.com/jaungiers/Fast-Parquet-Viewer)
