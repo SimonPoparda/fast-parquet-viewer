@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::mpsc;
 use eframe::egui;
 use egui::{
@@ -67,6 +68,22 @@ enum State {
     Error(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct ColumnFilter {
+    pub query: String,
+    pub case_sensitive: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ColumnFilterDialog {
+    pub col_idx: usize,
+    pub col_name: String,
+    pub col_dtype: String,
+    pub query: String,
+    pub case_sensitive: bool,
+    pub focus_input: bool,
+}
+
 pub struct ParquetApp {
     state:       State,
     rx:          Option<mpsc::Receiver<LoadResult>>,
@@ -80,6 +97,10 @@ pub struct ParquetApp {
     show_column_search:           bool,
     column_search_active:         usize,
     column_search_scroll_pending: bool,
+
+    // Per-column value filters and filter dialog state
+    column_filters:               HashMap<usize, ColumnFilter>,
+    filter_dialog:                Option<ColumnFilterDialog>,
 }
 
 impl ParquetApp {
@@ -101,6 +122,9 @@ impl ParquetApp {
             show_column_search:           false,
             column_search_active:         0,
             column_search_scroll_pending: false,
+
+            column_filters:               HashMap::new(),
+            filter_dialog:                None,
         };
         let palette = if dark_mode { Palette::dark() } else { Palette::light() };
         style_egui(&cc.egui_ctx, &palette, dark_mode);
@@ -117,6 +141,8 @@ impl ParquetApp {
         self.column_search.clear();
         self.show_column_search = false;
         self.column_search_active = 0;
+        self.column_filters.clear();
+        self.filter_dialog = None;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         loader::load_async(path, tx);
@@ -187,6 +213,111 @@ impl ParquetApp {
             }
         }
     }
+
+    fn show_column_filter_dialog(&mut self, ctx: &egui::Context, palette: &Palette) {
+        if let Some(dialog) = &mut self.filter_dialog {
+            let mut is_open = true;
+            let mut should_close = false;
+            let mut clear_clicked = false;
+            let col_idx = dialog.col_idx;
+            let col_name = dialog.col_name.clone();
+            let col_dtype = dialog.col_dtype.clone();
+
+            let total_rows = if let State::Loaded(data, _) = &self.state { data.row_count } else { 0 };
+            let matches_count = if let State::Loaded(data, _) = &self.state {
+                if dialog.query.is_empty() {
+                    total_rows
+                } else {
+                    let q_lower = dialog.query.to_lowercase();
+                    data.rows.iter().filter(|row| {
+                        let val = row.get(col_idx).map(String::as_str).unwrap_or("");
+                        if dialog.case_sensitive {
+                            val.contains(&dialog.query)
+                        } else {
+                            val.to_lowercase().contains(&q_lower)
+                        }
+                    }).count()
+                }
+            } else { 0 };
+
+            egui::Window::new(format!("Filter Column: {col_name}"))
+                .id(egui::Id::new("column_filter_dialog_window"))
+                .open(&mut is_open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(320.0)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.screen_rect().center())
+                .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Column:").color(palette.muted).size(12.0));
+                        ui.label(RichText::new(&col_name).strong().size(13.0).color(palette.text));
+                        ui.label(RichText::new(format!("({col_dtype})")).monospace().size(11.0).color(palette.muted));
+                    });
+
+                    ui.add_space(2.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Filter:").color(palette.muted).size(12.0));
+                        let text_edit = ui.add(
+                            egui::TextEdit::singleline(&mut dialog.query)
+                                .desired_width(220.0)
+                                .hint_text("type value to search…")
+                                .font(FontId::monospace(13.0))
+                        );
+                        if dialog.focus_input {
+                            text_edit.request_focus();
+                            dialog.focus_input = false;
+                        }
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            should_close = true;
+                        }
+                        if !dialog.query.is_empty() && ui.small_button("×").clicked() {
+                            dialog.query.clear();
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut dialog.case_sensitive, "Case sensitive");
+                    });
+
+                    ui.add_space(2.0);
+                    let count_text = format!("{} / {} rows matching", fmt_num(matches_count), fmt_num(total_rows));
+                    ui.label(RichText::new(count_text).color(palette.accent).size(12.0));
+
+                    ui.add_space(6.0);
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Done").size(12.0)).clicked() {
+                            should_close = true;
+                        }
+                        if ui.button(RichText::new("Clear").size(12.0)).clicked() {
+                            clear_clicked = true;
+                        }
+                    });
+                });
+
+            if clear_clicked {
+                dialog.query.clear();
+                self.column_filters.remove(&col_idx);
+                should_close = true;
+            } else if !dialog.query.is_empty() {
+                self.column_filters.insert(col_idx, ColumnFilter {
+                    query: dialog.query.clone(),
+                    case_sensitive: dialog.case_sensitive,
+                });
+            } else {
+                self.column_filters.remove(&col_idx);
+            }
+
+            if !is_open || should_close {
+                self.filter_dialog = None;
+            }
+        }
+    }
 }
 
 impl eframe::App for ParquetApp {
@@ -209,11 +340,15 @@ impl eframe::App for ParquetApp {
             if i.key_pressed(egui::Key::F) && i.modifiers.ctrl && i.modifiers.shift {
                 self.toggle_column_search();
             }
-            if i.key_pressed(egui::Key::Escape) && (self.show_search || self.show_column_search) {
-                self.show_search = false;
-                self.search.clear();
-                self.show_column_search = false;
-                self.column_search.clear();
+            if i.key_pressed(egui::Key::Escape) {
+                if self.filter_dialog.is_some() {
+                    self.filter_dialog = None;
+                } else if self.show_search || self.show_column_search {
+                    self.show_search = false;
+                    self.search.clear();
+                    self.show_column_search = false;
+                    self.column_search.clear();
+                }
             }
         });
 
@@ -226,7 +361,7 @@ impl eframe::App for ParquetApp {
             .frame(egui::Frame::new().fill(palette.surface).inner_margin(egui::Margin::symmetric(12, 6)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.visuals_mut().widgets.inactive.fg_stroke = Stroke::new(1.0, palette.text);
+                    ui.visuals_mut().widgets.inactive.fg_stroke = Stroke::new(1.0_f32, palette.text);
                     if ui.add(egui::Button::new(
                         RichText::new("Open…").color(palette.text).size(13.0)
                     ).frame(false)).clicked() {
@@ -302,19 +437,23 @@ impl eframe::App for ParquetApp {
                             ui.label(RichText::new("Loading…").color(palette.muted).size(12.0));
                         }
                         State::Loaded(data, ts) => {
-                            let visible = if self.show_search && !self.search.is_empty() {
-                                let q = self.search.to_lowercase();
-                                ts.row_order.iter().filter(|&&ri| {
-                                    data.rows[ri].iter().any(|c| c.to_lowercase().contains(&q))
-                                }).count()
+                            let global_q = if self.show_search && !self.search.is_empty() {
+                                Some(self.search.as_str())
                             } else {
-                                data.row_count
+                                None
                             };
+                            let visible = count_matching_rows(data, ts, global_q, &self.column_filters);
                             let size_str = fmt_size(data.file_size);
+                            let has_filter = global_q.is_some() || !self.column_filters.is_empty();
+                            let row_info = if has_filter {
+                                format!("{} / {} rows", fmt_num(visible), fmt_num(data.row_count))
+                            } else {
+                                format!("{} rows", fmt_num(visible))
+                            };
                             ui.label(
                                 RichText::new(format!(
-                                    "{} rows  ×  {} cols   │   {}   │   {}",
-                                    fmt_num(visible), data.col_count, size_str, data.file_path
+                                    "{}  ×  {} cols   │   {}   │   {}",
+                                    row_info, data.col_count, size_str, data.file_path
                                 ))
                                 .color(palette.muted)
                                 .size(12.0)
@@ -440,6 +579,33 @@ impl eframe::App for ParquetApp {
         let column_scroll_pending = self.column_search_scroll_pending;
         self.column_search_scroll_pending = false;
 
+        // Column filter chips bar
+        if !self.column_filters.is_empty() {
+            egui::TopBottomPanel::top("column_filter_chips")
+                .frame(egui::Frame::new().fill(palette.surface2).inner_margin(egui::Margin::symmetric(12, 6)))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Column filters:").color(palette.muted).size(12.0));
+                        let mut to_remove = None;
+                        if let State::Loaded(data, _) = &self.state {
+                            for (&col_idx, filter) in &self.column_filters {
+                                let col_name = data.columns.get(col_idx).map(|c| c.name.as_str()).unwrap_or("col");
+                                let text = format!("{}: \"{}\"", col_name, filter.query);
+                                if ui.button(RichText::new(format!("{text} ✕")).size(12.0).color(palette.accent)).clicked() {
+                                    to_remove = Some(col_idx);
+                                }
+                            }
+                        }
+                        if let Some(col_idx) = to_remove {
+                            self.column_filters.remove(&col_idx);
+                        }
+                        if ui.small_button("Clear all").clicked() {
+                            self.column_filters.clear();
+                        }
+                    });
+                });
+        }
+
         // Notice strip (file-association feedback)
         if let Some(msg) = self.notice.clone() {
             egui::TopBottomPanel::top("notice")
@@ -468,6 +634,8 @@ impl eframe::App for ParquetApp {
                 }
             });
 
+        let mut open_filter_dialog = None;
+
         // Draw table separately so we can mutate self
         if let State::Loaded(data, ts) = &mut self.state {
             egui::CentralPanel::default()
@@ -475,10 +643,27 @@ impl eframe::App for ParquetApp {
                 .show(ctx, |ui| {
                     draw_table(
                         ui, &palette, data, ts, &self.search, self.show_search,
+                        &self.column_filters, &mut open_filter_dialog,
                         &column_matches, active_col, column_scroll_pending,
                     );
                 });
         }
+
+        if let Some((col_idx, col_name, col_dtype)) = open_filter_dialog {
+            let existing_filter = self.column_filters.get(&col_idx);
+            let query = existing_filter.map(|f| f.query.clone()).unwrap_or_default();
+            let case_sensitive = existing_filter.map(|f| f.case_sensitive).unwrap_or(false);
+            self.filter_dialog = Some(ColumnFilterDialog {
+                col_idx,
+                col_name,
+                col_dtype,
+                query,
+                case_sensitive,
+                focus_input: true,
+            });
+        }
+
+        self.show_column_filter_dialog(ctx, &palette);
     }
 }
 
@@ -492,22 +677,20 @@ fn draw_table(
     ts: &mut TableState,
     search: &str,
     show_search: bool,
+    column_filters: &HashMap<usize, ColumnFilter>,
+    open_filter_dialog: &mut Option<(usize, String, String)>,
     column_matches: &[usize],
     active_col: Option<usize>,
     scroll_to_active_col: bool,
 ) {
-    let query = if show_search && !search.is_empty() {
+    let global_query = if show_search && !search.is_empty() {
         Some(search.to_lowercase())
     } else {
         None
     };
 
     let filtered: Vec<usize> = ts.row_order.iter().copied().filter(|&ri| {
-        if let Some(q) = &query {
-            data.rows[ri].iter().any(|c| c.to_lowercase().contains(q.as_str()))
-        } else {
-            true
-        }
+        row_matches_filters(&data.rows[ri], global_query.as_deref(), column_filters)
     }).collect();
 
     let col_count = data.col_count;
@@ -521,6 +704,7 @@ fn draw_table(
 
     egui::ScrollArea::horizontal()
         .id_salt("table_hscroll")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
     let mut builder = TableBuilder::new(ui)
         .striped(false)
@@ -528,9 +712,17 @@ fn draw_table(
         .column(Column::exact(64.0))
         .resizable(true);
 
-    for _ in 0..col_count {
-        builder = builder.column(Column::initial(120.0).at_least(40.0).clip(true));
+    for col_idx in 0..col_count {
+        let meta = &data.columns[col_idx];
+        let header_text_len = meta.name.len().max(meta.dtype.len());
+        let initial_w = (header_text_len as f32 * 9.0 + 48.0).max(120.0);
+        let min_w = (header_text_len as f32 * 8.0 + 36.0).max(50.0);
+        builder = builder.column(Column::initial(initial_w).at_least(min_w).clip(true));
     }
+
+    // Trailing spacer column: ensures the last data column can be resized freely
+    // and scrolled into view without hitting the right viewport boundary!
+    builder = builder.column(Column::remainder().at_least(140.0));
 
     builder
         .header(header_height, |mut header| {
@@ -545,10 +737,20 @@ fn draw_table(
                 let sort_asc = ts.sort_asc;
                 let is_column_match = column_matches.contains(&col_idx);
                 let is_active_column_match = active_col == Some(col_idx);
+                let active_filter = column_filters.get(&col_idx);
 
                 header.col(|ui| {
                     let rect = ui.available_rect_before_wrap();
                     ui.painter().rect_filled(rect, 0.0, p.header_bg);
+                    if active_filter.is_some() {
+                        // Gentle accent tint for columns with active filters
+                        ui.painter().rect_filled(
+                            rect, 0.0,
+                            Color32::from_rgba_premultiplied(
+                                p.accent.r(), p.accent.g(), p.accent.b(), 35,
+                            ),
+                        );
+                    }
                     if is_column_match {
                         // Subtle amber tint, same hue as row-search match highlighting.
                         ui.painter().rect_filled(
@@ -558,11 +760,11 @@ fn draw_table(
                     }
                     ui.painter().line_segment(
                         [rect.right_top(), rect.right_bottom()],
-                        Stroke::new(1.0, p.border),
+                        Stroke::new(1.0_f32, p.border),
                     );
                     ui.painter().line_segment(
                         [rect.left_bottom(), rect.right_bottom()],
-                        Stroke::new(1.0, p.border),
+                        Stroke::new(1.0_f32, p.border),
                     );
                     if is_active_column_match {
                         ui.painter().rect_stroke(rect, 0.0, Stroke::new(2.0_f32, p.accent), egui::StrokeKind::Inside);
@@ -578,6 +780,20 @@ fn draw_table(
                     if response.clicked() {
                         sort_request = Some(col_idx);
                     }
+                    if response.secondary_clicked() {
+                        *open_filter_dialog = Some((col_idx, meta.name.clone(), meta.dtype.clone()));
+                    }
+
+                    if let Some(f) = active_filter {
+                        response.on_hover_text(format!(
+                            "Filter active: \"{}\"\nRight-click to edit filter\nLeft-click to sort",
+                            f.query
+                        ));
+                    } else {
+                        response.on_hover_text(
+                            "Right-click to filter column\nLeft-click to sort"
+                        );
+                    }
 
                     let pad = 8.0;
                     let name_rect = egui::Rect::from_min_size(
@@ -590,10 +806,15 @@ fn draw_table(
                     );
 
                     let name_color = if is_sorted { p.accent } else { p.text };
+                    let header_display = if active_filter.is_some() {
+                        format!("{} 🔍", meta.name)
+                    } else {
+                        meta.name.clone()
+                    };
                     ui.painter().text(
                         name_rect.left_center(),
                         egui::Align2::LEFT_CENTER,
-                        &meta.name,
+                        &header_display,
                         FontId::new(13.0, egui::FontFamily::Proportional),
                         name_color,
                     );
@@ -618,6 +839,16 @@ fn draw_table(
                     }
                 });
             }
+
+            // Trailing spacer column header
+            header.col(|ui| {
+                let rect = ui.available_rect_before_wrap();
+                ui.painter().rect_filled(rect, 0.0, p.header_bg);
+                ui.painter().line_segment(
+                    [rect.left_bottom(), rect.right_bottom()],
+                    Stroke::new(1.0_f32, p.border),
+                );
+            });
         })
         .body(|body| {
             body.rows(row_height, row_count, |mut row| {
@@ -630,7 +861,7 @@ fn draw_table(
                     ui.painter().rect_filled(rect, 0.0, p.surface);
                     ui.painter().line_segment(
                         [rect.right_top(), rect.right_bottom()],
-                        Stroke::new(1.0, p.border),
+                        Stroke::new(1.0_f32, p.border),
                     );
                     ui.painter().text(
                         rect.right_center() - Vec2::new(8.0, 0.0),
@@ -642,13 +873,21 @@ fn draw_table(
                 });
 
                 for col_idx in 0..col_count {
+                    let meta = &data.columns[col_idx];
+                    let active_filter = column_filters.get(&col_idx);
+
                     row.col(|ui| {
                         let rect = ui.available_rect_before_wrap();
                         ui.painter().rect_filled(rect, 0.0, bg);
                         ui.painter().line_segment(
                             [rect.right_top(), rect.right_bottom()],
-                            Stroke::new(1.0, p.border),
+                            Stroke::new(1.0_f32, p.border),
                         );
+
+                        let cell_resp = ui.allocate_rect(rect, egui::Sense::click());
+                        if cell_resp.secondary_clicked() {
+                            *open_filter_dialog = Some((col_idx, meta.name.clone(), meta.dtype.clone()));
+                        }
 
                         let cell_val = data.rows[data_row].get(col_idx).map(String::as_str).unwrap_or("");
                         let is_null = cell_val.is_empty();
@@ -662,13 +901,33 @@ fn draw_table(
                                 p.null,
                             );
                         } else {
-                            if let Some(q) = &query {
+                            if let Some(f) = active_filter {
+                                if !f.query.is_empty() {
+                                    let matches = if f.case_sensitive {
+                                        cell_val.contains(&f.query)
+                                    } else {
+                                        cell_val.to_lowercase().contains(&f.query.to_lowercase())
+                                    };
+                                    if matches {
+                                        let mut job = LayoutJob::default();
+                                        highlight_matches(&mut job, cell_val, &f.query, p.text);
+                                        ui.painter().galley(
+                                            rect.left_center() + Vec2::new(6.0, 0.0),
+                                            ui.fonts(|fonts| fonts.layout_job(job)),
+                                            Color32::WHITE,
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+
+                            if let Some(q) = &global_query {
                                 if cell_val.to_lowercase().contains(q.as_str()) {
                                     let mut job = LayoutJob::default();
                                     highlight_matches(&mut job, cell_val, q, p.text);
                                     ui.painter().galley(
                                         rect.left_center() + Vec2::new(6.0, 0.0),
-                                        ui.fonts(|f| f.layout_job(job)),
+                                        ui.fonts(|fonts| fonts.layout_job(job)),
                                         Color32::WHITE,
                                     );
                                     return;
@@ -685,6 +944,12 @@ fn draw_table(
                         }
                     });
                 }
+
+                // Trailing spacer row cell
+                row.col(|ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    ui.painter().rect_filled(rect, 0.0, bg);
+                });
             });
         });
 
@@ -695,14 +960,67 @@ fn draw_table(
     }
 }
 
+fn row_matches_filters(
+    row: &[String],
+    global_query: Option<&str>,
+    column_filters: &HashMap<usize, ColumnFilter>,
+) -> bool {
+    if let Some(q) = global_query {
+        if !row.iter().any(|c| c.to_lowercase().contains(q)) {
+            return false;
+        }
+    }
+    for (&col_idx, filter) in column_filters {
+        if filter.query.is_empty() {
+            continue;
+        }
+        let cell = row.get(col_idx).map(String::as_str).unwrap_or("");
+        if filter.case_sensitive {
+            if !cell.contains(&filter.query) {
+                return false;
+            }
+        } else {
+            let q_lower = filter.query.to_lowercase();
+            if !cell.to_lowercase().contains(&q_lower) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn count_matching_rows(
+    data: &ParquetData,
+    ts: &TableState,
+    global_query: Option<&str>,
+    column_filters: &HashMap<usize, ColumnFilter>,
+) -> usize {
+    if global_query.is_none() && column_filters.is_empty() {
+        return data.row_count;
+    }
+    let gq_lower = global_query.map(|q| q.to_lowercase());
+    ts.row_order.iter().filter(|&&ri| {
+        row_matches_filters(&data.rows[ri], gq_lower.as_deref(), column_filters)
+    }).count()
+}
+
 // ── Highlight search matches ──────────────────────────────────────────────────
 
 fn highlight_matches(job: &mut LayoutJob, text: &str, query: &str, text_color: Color32) {
     let lower = text.to_lowercase();
+    let q_lower = query.to_lowercase();
+    if q_lower.is_empty() {
+        job.append(text, 0.0, egui::TextFormat {
+            font_id: FontId::new(12.0, egui::FontFamily::Proportional),
+            color: text_color,
+            ..Default::default()
+        });
+        return;
+    }
     let mut last = 0usize;
     let mut search_start = 0usize;
 
-    while let Some(pos) = lower[search_start..].find(query) {
+    while let Some(pos) = lower[search_start..].find(&q_lower) {
         let abs = search_start + pos;
         if abs > last {
             job.append(&text[last..abs], 0.0, egui::TextFormat {
@@ -711,7 +1029,7 @@ fn highlight_matches(job: &mut LayoutJob, text: &str, query: &str, text_color: C
                 ..Default::default()
             });
         }
-        let end = abs + query.len();
+        let end = (abs + q_lower.len()).min(text.len());
         job.append(&text[abs..end], 0.0, egui::TextFormat {
             font_id: FontId::new(12.0, egui::FontFamily::Proportional),
             color: Color32::BLACK,
@@ -788,9 +1106,9 @@ fn style_egui(ctx: &egui::Context, p: &Palette, dark: bool) {
     style.visuals.selection.bg_fill = Color32::from_rgba_premultiplied(
         p.accent.r(), p.accent.g(), p.accent.b(), 60,
     );
-    style.visuals.selection.stroke = Stroke::new(1.0, p.accent);
-    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+    style.visuals.selection.stroke = Stroke::new(1.0_f32, p.accent);
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text);
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.text);
 
     style.spacing.item_spacing = Vec2::new(8.0, 4.0);
     style.spacing.button_padding = Vec2::new(8.0, 4.0);

@@ -19,13 +19,15 @@ same MIT license.
 - **Virtual scrolling** — handles large files without loading the full table into view at once
 - **Column sorting** — click any column header to sort ascending/descending (numeric-aware)
 - **Search / filter rows** — `Ctrl+F` to filter rows by any matching cell value, with match highlighting
+- **Column-specific filter** — right-click any column header or cell to open a dedicated filter dialog for that specific column (with live match count, case-sensitivity toggle, and active filter chips toolbar)
 - **Search columns** — `Ctrl+Shift+F` (or the column-search button) to find a column by
   name (case-insensitive substring match); the table scrolls to and highlights matching
   column headers, cycling through matches with Enter / Shift+Enter or the prev/next buttons
+- **Full column resizing** — resize all columns freely, including the last column without clipping or viewport cutoff
 - **Schema display** — column names and data types shown in the header
 - **Status bar** — shows row/column count and file size
 - **CLI support** — pass a file path as an argument: `ParquetViewer.exe data.parquet`
-- Dark theme
+- Dark & Light themes
 
 ## Building from source
 
