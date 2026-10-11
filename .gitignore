@@ -13,3 +13,7 @@ CLAUDE.md
 # OS
 .DS_Store
 Thumbs.db
+
+#github
+.github/*
+!.github/workflows/*
